@@ -1,4 +1,3 @@
-import {AxiosError, AxiosResponse} from 'axios';
 import {IncomingMessage, ServerResponse} from 'http';
 import {CheerioAPI, Element} from 'cheerio';
 
@@ -20,7 +19,11 @@ const instance = axios.create({
 type DataType = {
     date: string
     points: string
-}
+};
+type TimeIntervalType = {
+    from: string
+    to: string
+};
 
 const getParsedData = (html: HTMLDocument) => {
     const data: Array<DataType> = [];
@@ -37,39 +40,79 @@ const getParsedData = (html: HTMLDocument) => {
     });
     return data;
 };
+const getCountedPoints = (data: Array<DataType>, interval: TimeIntervalType) => {
+    const filteredDate = data.filter(el => el.date >= interval.to && el.date < interval.from);
+    return filteredDate.reduce((acc, el) => acc += Number(el.points), 0)
+};
+const requestContributions = async (name: string): Promise<HTMLDocument> => {
+    const html = await instance.get(`/${name}/contributions`);
+    return html.data;
+};
 
-const server = http.createServer((request: IncomingMessage, response: ServerResponse) => {
-    if (request.url) {
-        const url = new URL(request.url, serverOrigin);
-        const query = parseQuery(url.search.substr(1));
-        const {name, dayCount} = query;
+const timeInterval = (dayCount: number): TimeIntervalType => {
+    const toMilliseconds = Date.now() - dayCount * 86400000;
+    return {
+        from: new Date().toISOString().slice(0, 10),
+        to: new Date(toMilliseconds).toISOString().slice(0, 10)
+    }
+};
+const createResObj = (message: string, resultCode: number = 1) => {
+    return JSON.stringify({
+        message,
+        resultCode
+    })
+};
 
-        if (url.pathname === '/contributions') {
-            instance.get(`/${name}/contributions`)
-                .then((res: AxiosResponse<HTMLDocument>) => {
-                    const data = getParsedData(res.data)
+const server = http.createServer(async (request: IncomingMessage, response: ServerResponse) => {
+        if (request.url) {
+            const url = new URL(request.url, serverOrigin);
+            const query = parseQuery(url.search.substr(1));
+            const {name, dayCount = 30} = query;
 
-                    const from = new Date().toISOString().slice(0, 10);
-                    const toMilliseconds = Date.now() - Number(dayCount) * 86400000
-                    const to = new Date(toMilliseconds).toISOString().slice(0, 10);
+            if (url.pathname === '/contributions') {
+                if (!name) {
+                    response.statusCode = 400;
+                    return response.end(createResObj(`Parameter 'Name' not transferred`));
+                }
+                if (!isFinite(dayCount) || dayCount === '') {
+                    response.statusCode = 400;
+                    return response.end(createResObj(`Parameter 'DayCount' not correct`));
+                }
+                if (dayCount > 365 && dayCount > 0) {
+                    response.statusCode = 400;
+                    return response.end(createResObj(`Value 'DayCount' must be in interval from 0 to 365.`));
+                }
+                try {
+                    const html = await requestContributions(name);
+                    const parsedData = getParsedData(html);
+                    const interval = timeInterval(Number(dayCount));
+                    const countedPoints = getCountedPoints(parsedData, interval);
 
-                    const filteredDate = data.filter(el => el.date >= to && el.date < from);
-                    const countedPoints = filteredDate.reduce((acc, el) => acc += Number(el.points), 0);
+                    const responseObg = {
+                        points: countedPoints,
+                        resultCode: 0
+                    }
 
-                    const responseObg = {points: countedPoints}
                     response.statusCode = 200;
-                    response.end(JSON.stringify(responseObg));
-                })
-                .catch((error: AxiosError) => {
-                    const responseObg = {message: 'Not found'}
-                    response.statusCode = 404;
-                    response.end(JSON.stringify(responseObg));
-                })
+                    return response.end(JSON.stringify(responseObg));
+                } catch (error) {
+                    if (error.response?.status === 404) {
+                        response.statusCode = 404;
+                        return response.end(createResObj('User not found'));
+                    }
+                    response.statusCode = 400;
+                    return response.end(createResObj('Something went wrong'));
+                }
+            }
         }
     }
-});
+);
 
 
-server.listen(PORT, hostname, () => {
-    console.log(`Server running at http://${hostname}:${PORT}/`);
-});
+try {
+    server.listen(PORT, hostname, () => {
+        console.log(`Server running at http://${hostname}:${PORT}/`);
+    });
+} catch (error) {
+    console.log(error);
+}
